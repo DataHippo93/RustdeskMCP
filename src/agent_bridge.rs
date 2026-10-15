@@ -338,7 +338,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "keyboard_hotkey",
-                "Send a key chord such as Ctrl+V or Enter to the remote desktop session while temporarily blocking user input.",
+                "Send a key chord such as Ctrl+V or Enter to the remote desktop session while temporarily blocking user input. [\"ctrl\",\"alt\",\"delete\"] (or [\"ctrl_alt_del\"]) sends a real Ctrl+Alt+Del to unlock or sign in.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -847,6 +847,18 @@ fn keyboard_hotkey(session_handle: &str, keys: &[String]) -> Result<Value, Strin
     ensure_mcp_enabled()?;
     let session_id = resolve_actual_session_id(session_handle)?;
     let session = desktop_session(session_handle)?;
+    // Ctrl+Alt+Del is a secure attention sequence: Windows ignores it as plain key events.
+    // Send RustDesk's dedicated CtrlAltDel control key instead (same as the toolbar menu item).
+    if is_ctrl_alt_del(keys) {
+        with_agent_input_bypass(|| session.ctrl_alt_del());
+        return Ok(json!({
+            "success": true,
+            "session": session_handle,
+            "actualSession": session_id.to_string(),
+            "keys": keys,
+            "sent": "ctrl_alt_del"
+        }));
+    }
     let hotkey = Hotkey::parse(keys)?;
     with_agent_input_bypass(|| -> Result<(), String> {
         let keyboard_mode = session.get_keyboard_mode();
@@ -2045,5 +2057,35 @@ impl ProtocolError {
             code,
             message: message.into(),
         }
+    }
+}
+
+/// True for ["ctrl","alt","del"|"delete"] in any order/case, or a single "ctrl_alt_del"/"ctrl+alt+del"/"sas".
+fn is_ctrl_alt_del(keys: &[String]) -> bool {
+    let norm: Vec<String> = keys.iter().map(|k| k.trim().to_ascii_lowercase()).collect();
+    if norm.len() == 1 {
+        return matches!(
+            norm[0].as_str(),
+            "ctrl_alt_del" | "ctrl+alt+del" | "ctrl+alt+delete" | "ctrlaltdel" | "sas"
+        );
+    }
+    if norm.len() != 3 {
+        return false;
+    }
+    let has = |names: &[&str]| norm.iter().any(|k| names.contains(&k.as_str()));
+    has(&["ctrl", "control"]) && has(&["alt"]) && has(&["del", "delete"])
+}
+
+#[cfg(test)]
+mod ctrl_alt_del_tests {
+    use super::is_ctrl_alt_del;
+    fn v(k: &[&str]) -> Vec<String> { k.iter().map(|s| s.to_string()).collect() }
+    #[test]
+    fn detects_chord_and_alias() {
+        assert!(is_ctrl_alt_del(&v(&["ctrl", "alt", "delete"])));
+        assert!(is_ctrl_alt_del(&v(&["Alt", "Control", "Del"])));
+        assert!(is_ctrl_alt_del(&v(&["ctrl_alt_del"])));
+        assert!(!is_ctrl_alt_del(&v(&["ctrl", "delete"])));
+        assert!(!is_ctrl_alt_del(&v(&["ctrl", "alt", "t"])));
     }
 }
