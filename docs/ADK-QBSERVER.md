@@ -56,6 +56,17 @@ Monitoring: Cowork scheduled task "QB machines watch (Sync Runner + QBSERVER)" e
 
 Known gaps: Sync Runner `AutoAdminLogon=0`, so after a reboot nothing runs until someone signs in. RustDesk terminal does not open on QBSERVER (desktop works); use Win+R PowerShell there.
 
+## QBSERVER: Web Connector under its own Windows user (2026-10-15)
+QBSERVER now auto signs in a dedicated local user `qbsync` at boot (Sysinternals Autologon, password in BWS `QBSERVER_QBSYNC_WINDOWS_PWD`), locks it, and runs the Web Connector and the `QBWC Watchdog` there. Administrator's session no longer starts the Web Connector, so people can use QuickBooks as Administrator while syncs run. Full setup and undo: `yc-qb-web-connector` `docs/unattended-mode-setup.md`, "How QBSERVER is actually set up".
+
+What this changes for remote work:
+- After a reboot RustDesk shows the console session, which is qbsync's (locked). Unlock with the qbsync password via `rdact.js` `typeEnv`, never by typing it in a command line.
+- To work as Administrator, sign in as Administrator from the lock screen ("Other user"); qbsync's session keeps running in the background. Do not sign qbsync out.
+- A Windows update reboot can take 30+ minutes and reboots twice on Server 2016.
+
+## When a session goes stale
+After the remote machine reboots, RustDeskMCP can keep serving the last frame ("Restarting") and terminal sessions return nothing. Restart the RustDeskMCP UI process on Clark's PC with `C:\RustDeskMCP\rdrestart.ps1` (copy in `tools/rdrestart.ps1`). It reloads the `RUSTDESK_MCP_*` variables from the user environment first; started without them the server answers "MCP token not set".
+
 ## Diagnostic tools (on Clark's PC, C:\RustDeskMCP)
 - `node rdterm.js <id> <cmdfile> [waitSec]` runs PowerShell text in a RustDesk terminal and prints output (Sync Runner only).
 - `node rdact.js <id> <actions.json> <out.png>` clicks/types/hotkeys then saves a frame. `{"typeEnv":"VAR"}` types a secret from env without echoing it.
