@@ -1,37 +1,45 @@
 # RustDeskMCP for QBSERVER (ADK fork)
 
-Hardened build of RustDeskMCP. Claude drives QBSERVER through a RustDesk session from Clark's PC. QBSERVER runs stock RustDesk only.
+Hardened build of RustDeskMCP. Claude drives QBSERVER (and Sync Runner) through a RustDesk session from Clark's PC (CLARK-MAINGEAR). The remote machines run stock RustDesk only. Nothing AI-related is installed on them.
 
-## Changes from upstream fork (src/agent_bridge.rs)
+## Machines
+| Machine | RustDesk ID |
+|---|---|
+| QBSERVER | 427551931 |
+| Sync Runner | 323508260 |
+
+## Changes from upstream (src/agent_bridge.rs)
 - Bearer token required on every request (`RUSTDESK_MCP_TOKEN`, 24+ chars). No token set = server refuses everything.
-- Requests with an `Origin` header are refused (blocks any website in your browser from driving the session).
+- Requests with an `Origin` header are refused (blocks any website in a browser from driving the session).
 - `Host` must be 127.0.0.1 / localhost (blocks DNS rebinding).
 - CORS `*` headers removed. Body capped at 1 MB.
 - Only RustDesk IDs in `RUSTDESK_MCP_ALLOWED_IDS` (comma separated) can be opened.
 
-## Build
-GitHub > Actions > "Windows RustDeskMCP build (ADK)" > Run workflow. Download artifact `RustDeskMCP-windows-x64` (unsigned; Windows SmartScreen will warn).
+Verified 2026-10-15 on CLARK-MAINGEAR: no/wrong token 401, Origin 403, bad Host 403, non-allowlisted ID refused, 13 tools listed with valid token.
 
-## Install on Clark's PC
-1. Unzip to `C:\RustDeskMCP\`.
-2. PowerShell (once):
-   `setx RUSTDESK_MCP_TOKEN "<long random token>"`
-   `setx RUSTDESK_MCP_ALLOWED_IDS "<QBSERVER RustDesk ID>"`
-3. Sign out/in (or reboot) so the variables load. Start `C:\RustDeskMCP\RustDeskMCP.exe`.
-4. Settings > Security > Enable MCP server.
-5. Install Node.js LTS. Claude desktop > Settings > Developer > Edit Config, add:
+## Build
+GitHub > Actions > "Windows RustDeskMCP build (ADK)" > Run workflow (about 50 min cold). Artifact `RustDeskMCP-windows-x64` (unsigned).
+
+## Install on Clark's PC (as installed 2026-10-15)
+- App: `C:\RustDeskMCP\app\RustDeskMCP.exe` (portable; own config in `%APPDATA%\RustDeskMCP`, separate from stock RustDesk).
+- Starts at logon: shortcut in the user Startup folder.
+- MCP option: `enable-mcp-server = 'Y'` in `%APPDATA%\RustDeskMCP\config\RustDeskMCP_local.toml`.
+- User env vars: `RUSTDESK_MCP_TOKEN` (generated locally, 48 chars), `RUSTDESK_MCP_AUTH` (`Bearer <token>`), `RUSTDESK_MCP_ALLOWED_IDS=427551931,323508260`.
+- Bridge: mcp-remote 0.1.29 pinned in `C:\RustDeskMCP\mcp-remote` (no npx fetch at launch).
+- Claude desktop config entry (token comes from the env var, not stored in the file):
 ```json
-{
-  "mcpServers": {
-    "rustdesk": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "http://127.0.0.1:59940/mcp", "--header", "Authorization:${AUTH}"],
-      "env": { "AUTH": "Bearer <same token>" }
-    }
-  }
+"rustdesk": {
+  "command": "node",
+  "args": ["C:\\RustDeskMCP\\mcp-remote\\node_modules\\mcp-remote\\dist\\proxy.js",
+           "http://127.0.0.1:59940/mcp", "--header", "Authorization:${RUSTDESK_MCP_AUTH}"]
 }
 ```
-6. Quit Claude from the tray, reopen, confirm `rustdesk` tools appear.
 
-## On QBSERVER
+## One-time password setup
+Open RustDeskMCP by hand, connect to each ID, type the password (BWS `QBSERVER_AND_SYNC_RUNNER_RUSTDESK_PWD`), tick **Remember password**. After that, sessions open without a password and it never passes through Claude. If the remote password changes, repeat this.
+
+## Rotating the token
+Regenerate `RUSTDESK_MCP_TOKEN` and `RUSTDESK_MCP_AUTH`, then restart RustDeskMCP and Claude desktop.
+
+## On the remote machines
 Stock RustDesk, permanent password, start with Windows, never sleep, stay signed in.
