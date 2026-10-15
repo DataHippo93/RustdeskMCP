@@ -41,3 +41,22 @@ Regenerate `RUSTDESK_MCP_TOKEN` and `RUSTDESK_MCP_AUTH`, then restart RustDeskMC
 
 ## On the remote machines
 Stock RustDesk, permanent password, start with Windows, never sleep, stay signed in.
+
+## Incident 2026-10-14/15: Method sync down, ghost tray icons on Sync Runner
+Root cause: QBSERVER has three adapters. The Panini mIDeal check scanner's USB network adapter (192.168.4.171) had the same metric as the LAN NIC (NIC2, 192.168.250.48), so QuickBooks wrote `ServerIp=192.168.4.171` into the company files' `.ND` files. Sync Runner (192.168.250.236) cannot reach 192.168.4.x, so QuickBooks there could not open company files, Method retried every minute and each failed engine launch left a dead tray icon. QuickBooks on QBSERVER also crashed 10/14 6:47 PM.
+
+Fixes applied:
+- QBSERVER: NIC2 metric 10, Panini adapter metric 900 and DNS registration off. Re-applied at startup and hourly by SYSTEM task `ADK QB NIC priority` (`C:\ProgramData\ADK\qb-nic-priority.ps1`). `QuickBooksDB34` set to Automatic (was Manual) and restarted. DB server listens on dynamic port 64792 (not 5537x); 8019 is QBCFMonitor.
+- `.ND` files are rewritten by whichever QuickBooks client opens the file first. A QuickBooks session open since before a NIC change keeps advertising the old address; close it and reopen.
+- Sync Runner: timezone fixed (was Pacific). Watchdog task `ADK Sync Runner watchdog` (every 5 min + at logon, `C:\ProgramData\ADK\sr-watchdog.ps1`, copy in `tools/sr-watchdog.ps1`) reopens QuickBooks (last company, Sandy Maine Inc) and Method if either stops, logs to `C:\ProgramData\ADK\watchdog.log`, heartbeat in `watchdog.heartbeat`.
+- Method (adkfragrancefarm account) syncs the **Sandy Maine Inc** file, not YC Works. It must stay open on Sync Runner.
+- Ghost icons: cleared by restarting Explorer. They only build up when Method loops on QuickBooks failures.
+
+Monitoring: Cowork scheduled task "QB machines watch (Sync Runner + QBSERVER)" every 2 h 6:57 AM to 8:57 PM ET, runs `tools/sr-health.txt` through `rdterm.js` on Clark's PC. It may restart Explorer and the watchdog on Sync Runner; it never touches QBSERVER services or QuickBooks.
+
+Known gaps: Sync Runner `AutoAdminLogon=0`, so after a reboot nothing runs until someone signs in. RustDesk terminal does not open on QBSERVER (desktop works); use Win+R PowerShell there.
+
+## Diagnostic tools (on Clark's PC, C:\RustDeskMCP)
+- `node rdterm.js <id> <cmdfile> [waitSec]` runs PowerShell text in a RustDesk terminal and prints output (Sync Runner only).
+- `node rdact.js <id> <actions.json> <out.png>` clicks/types/hotkeys then saves a frame. `{"typeEnv":"VAR"}` types a secret from env without echoing it.
+- `node qbtest.js <id> <out.png>` grabs a screenshot.
