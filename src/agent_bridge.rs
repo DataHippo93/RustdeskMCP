@@ -38,6 +38,11 @@ const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(12);
 const FRAME_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+// Hardening (ADK fork): bearer token + peer allowlist come from environment variables.
+const MCP_TOKEN_ENV: &str = "RUSTDESK_MCP_TOKEN";
+const MCP_ALLOWED_IDS_ENV: &str = "RUSTDESK_MCP_ALLOWED_IDS";
+const MCP_MIN_TOKEN_LEN: usize = 24;
+const MCP_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 static START_MCP_SERVER: Once = Once::new();
 static DESKTOP_SESSION_REGISTRY: OnceLock<Mutex<HashMap<String, DesktopSessionHandle>>> =
@@ -93,8 +98,8 @@ fn handle_http_client(mut stream: TcpStream) -> io::Result<()> {
 
 fn route_http_request(request: HttpRequest) -> HttpResponse {
     let path = request.path.split('?').next().unwrap_or_default();
-    if request.method == "OPTIONS" {
-        return HttpResponse::empty(204, "No Content");
+    if let Err(response) = authorize_http_request(&request) {
+        return response;
     }
     if path != "/" && path != MCP_HTTP_PATH {
         return HttpResponse::text(404, "Not Found", "RustDesk MCP endpoint not found");
@@ -498,6 +503,7 @@ fn jsonrpc_error(id: Value, code: i32, message: impl Into<String>) -> Value {
 
 fn open_desktop_session(peer_id: &str) -> Result<Value, String> {
     ensure_mcp_enabled()?;
+    ensure_peer_allowed(peer_id)?;
     clear_local_input_lock_for_peer(peer_id);
 
     if let Some(snapshot) = latest_desktop_session(peer_id) {
@@ -579,6 +585,7 @@ fn input_password(session_handle: &str, password: &str) -> Result<Value, String>
 
 fn open_terminal_session(peer_id: &str, rows: u32, cols: u32) -> Result<Value, String> {
     ensure_mcp_enabled()?;
+    ensure_peer_allowed(peer_id)?;
     clear_local_input_lock_for_peer(peer_id);
     let before = terminal_session_ids(peer_id);
     crate::run_me(vec!["--terminal", peer_id]).map_err(|error| {
@@ -908,6 +915,89 @@ fn keyboard_hotkey(session_handle: &str, keys: &[String]) -> Result<Value, Strin
         "actualSession": session_id.to_string(),
         "keys": keys
     }))
+}
+
+/// Rejects anything that is not a local, non-browser client presenting the bearer token.
+/// - Browsers always send an Origin header on cross-site POSTs, so any Origin is refused.
+/// - Host must be the loopback address, which blocks DNS-rebinding attacks.
+/// - Authorization must be `Bearer <RUSTDESK_MCP_TOKEN>`; with no token configured, everything is refused.
+fn authorize_http_request(request: &HttpRequest) -> Result<(), HttpResponse> {
+    if request.headers.contains_key("origin") {
+        return Err(HttpResponse::text(
+            403,
+            "Forbidden",
+            "Browser requests are not allowed",
+        ));
+    }
+    let host_ok = match request.headers.get("host") {
+        Some(host) => {
+            let host = host.to_ascii_lowercase();
+            let name = host.rsplit_once(':').map(|(name, _)| name).unwrap_or(&host);
+            name == "127.0.0.1" || name == "localhost" || name == "[::1]"
+        }
+        None => false,
+    };
+    if !host_ok {
+        return Err(HttpResponse::text(403, "Forbidden", "Invalid Host header"));
+    }
+    let expected = std::env::var(MCP_TOKEN_ENV).unwrap_or_default();
+    let expected = expected.trim();
+    if expected.len() < MCP_MIN_TOKEN_LEN {
+        return Err(HttpResponse::text(
+            401,
+            "Unauthorized",
+            "MCP token not configured. Set RUSTDESK_MCP_TOKEN (24+ characters) and restart RustDeskMCP.",
+        ));
+    }
+    let presented = request
+        .headers
+        .get("authorization")
+        .and_then(|value| {
+            let value = value.trim();
+            if value.len() > 7 && value[..7].eq_ignore_ascii_case("bearer ") {
+                Some(value[7..].trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+        return Err(HttpResponse::text(401, "Unauthorized", "Invalid MCP token"));
+    }
+    Ok(())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn normalize_peer_id(id: &str) -> String {
+    id.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase()
+}
+
+/// Only RustDesk IDs listed in RUSTDESK_MCP_ALLOWED_IDS (comma separated) may be opened.
+fn ensure_peer_allowed(peer_id: &str) -> Result<(), String> {
+    let allowed = std::env::var(MCP_ALLOWED_IDS_ENV).unwrap_or_default();
+    let wanted = normalize_peer_id(peer_id);
+    let ok = !wanted.is_empty()
+        && allowed
+            .split(',')
+            .map(normalize_peer_id)
+            .any(|id| !id.is_empty() && id == wanted);
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "peer '{peer_id}' is not in {MCP_ALLOWED_IDS_ENV}; add it there and restart RustDeskMCP"
+        ))
+    }
 }
 
 fn mcp_enabled() -> bool {
@@ -1563,6 +1653,12 @@ fn read_http_request(stream: &TcpStream) -> io::Result<Option<HttpRequest>> {
         }
     }
 
+    if content_length > MCP_MAX_BODY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "request body too large",
+        ));
+    }
     let mut body = vec![0; content_length];
     if content_length > 0 {
         reader.read_exact(&mut body)?;
@@ -1580,18 +1676,6 @@ fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> io::Re
     let mut headers = vec![
         ("Connection".to_string(), "close".to_string()),
         ("Content-Length".to_string(), response.body.len().to_string()),
-        (
-            "Access-Control-Allow-Origin".to_string(),
-            "*".to_string(),
-        ),
-        (
-            "Access-Control-Allow-Headers".to_string(),
-            "Content-Type, Accept, MCP-Protocol-Version".to_string(),
-        ),
-        (
-            "Access-Control-Allow-Methods".to_string(),
-            "POST, GET, OPTIONS".to_string(),
-        ),
         (
             "MCP-Protocol-Version".to_string(),
             MCP_PROTOCOL_VERSION.to_string(),
