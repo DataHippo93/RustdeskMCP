@@ -2085,11 +2085,32 @@ mod ctrl_alt_del_tests {
         flutter::FlutterHandler,
         ui_session_interface::Session,
     };
-    use hbb_common::message_proto::ControlKey;
-    use tokio::sync::mpsc;
+    use hbb_common::{
+        message_proto::ControlKey,
+        rendezvous_proto::ConnType,
+        tokio::sync::mpsc,
+    };
 
     fn v(k: &[&str]) -> Vec<String> {
         k.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn session_with_target_platform(peer_id: &str, platform: &str) -> Session<FlutterHandler> {
+        let session = Session::<FlutterHandler>::default();
+        {
+            let mut config = session.lc.write().unwrap();
+            config.initialize(
+                peer_id.to_string(),
+                ConnType::DEFAULT_CONN,
+                None,
+                false,
+                None,
+                None,
+                None,
+            );
+            config.get_config().info.platform = platform.to_string();
+        }
+        session
     }
 
     #[test]
@@ -2112,21 +2133,25 @@ mod ctrl_alt_del_tests {
 
     #[test]
     fn desktop_ctrl_alt_del_respects_input_lock() {
-        let session = Session::<FlutterHandler>::default();
+        let peer_id = "ctrl-alt-del-test-desktop-lock";
+        let session = session_with_target_platform(peer_id, "Windows");
         let (sender, mut receiver) = mpsc::unbounded_channel();
         *session.sender.write().unwrap() = Some(sender);
 
-        set_local_input_lock_for_peer("", true);
+        set_local_input_lock_for_peer(peer_id, true);
         session.ctrl_alt_del();
         let event = receiver.try_recv();
-        set_local_input_lock_for_peer("", false);
+        set_local_input_lock_for_peer(peer_id, false);
 
         assert!(event.is_err());
     }
 
     #[test]
     fn agent_ctrl_alt_del_returns_error_when_dispatch_fails() {
-        let session = Session::<FlutterHandler>::default();
+        let session = session_with_target_platform(
+            "ctrl-alt-del-test-dispatch-failure",
+            "Windows",
+        );
         let (sender, receiver) = mpsc::unbounded_channel();
         *session.sender.write().unwrap() = Some(sender);
         drop(receiver);
@@ -2138,17 +2163,37 @@ mod ctrl_alt_del_tests {
     }
 
     #[test]
-    fn agent_ctrl_alt_del_uses_target_platform_not_current_ui_platform() {
-        let session = Session::<FlutterHandler>::default();
-        session.lc.write().unwrap().info.platform = "Linux".to_string();
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        *session.sender.write().unwrap() = Some(sender);
+    fn agent_ctrl_alt_del_uses_each_target_platform() {
+        let linux = session_with_target_platform(
+            "ctrl-alt-del-test-linux-target",
+            "Linux",
+        );
+        let (linux_sender, mut linux_receiver) = mpsc::unbounded_channel();
+        *linux.sender.write().unwrap() = Some(linux_sender);
+        linux.try_ctrl_alt_del_agent().unwrap();
 
-        session.try_ctrl_alt_del_agent().unwrap();
-
-        let Data::Message(message) = receiver.try_recv().unwrap() else {
-            panic!("expected a keyboard message");
+        let Data::Message(linux_message) = linux_receiver.try_recv().unwrap() else {
+            panic!("expected a keyboard message for the Linux target");
         };
-        assert_eq!(message.key_event().control_key(), ControlKey::Delete);
+        assert_eq!(
+            linux_message.key_event().control_key(),
+            ControlKey::Delete
+        );
+
+        let windows = session_with_target_platform(
+            "ctrl-alt-del-test-windows-target",
+            "Windows",
+        );
+        let (windows_sender, mut windows_receiver) = mpsc::unbounded_channel();
+        *windows.sender.write().unwrap() = Some(windows_sender);
+        windows.try_ctrl_alt_del_agent().unwrap();
+
+        let Data::Message(windows_message) = windows_receiver.try_recv().unwrap() else {
+            panic!("expected a keyboard message for the Windows target");
+        };
+        assert_eq!(
+            windows_message.key_event().control_key(),
+            ControlKey::CtrlAltDel
+        );
     }
 }
