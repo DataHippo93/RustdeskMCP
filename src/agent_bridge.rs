@@ -338,7 +338,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "keyboard_hotkey",
-                "Send a key chord such as Ctrl+V or Enter to the remote desktop session while temporarily blocking user input. Ctrl+Alt+Del sends a real secure attention sequence when keys are exactly three trimmed, case-insensitive values containing ctrl or control, alt, and del or delete in any order, or exactly one trimmed, case-insensitive alias: ctrl_alt_del, ctrl+alt+del, ctrl+alt+delete, ctrlaltdel, or sas.",
+                "Send a key chord such as Ctrl+V or Enter to the remote desktop session while temporarily blocking user input. Ctrl+Alt+Del sends RustDesk's dedicated CtrlAltDel secure-attention control event when the targeted remote session is Windows; for other target platforms it sends the ordinary Ctrl+Alt+Delete event. Recognized forms are exactly three trimmed, case-insensitive values containing ctrl or control, alt, and del or delete in any order, or exactly one trimmed, case-insensitive alias: ctrl_alt_del, ctrl+alt+del, ctrl+alt+delete, ctrlaltdel, or sas.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -2079,8 +2079,19 @@ fn is_ctrl_alt_del(keys: &[String]) -> bool {
 
 #[cfg(test)]
 mod ctrl_alt_del_tests {
-    use super::is_ctrl_alt_del;
-    fn v(k: &[&str]) -> Vec<String> { k.iter().map(|s| s.to_string()).collect() }
+    use super::{is_ctrl_alt_del, set_local_input_lock_for_peer};
+    use crate::{
+        client::Data,
+        flutter::FlutterHandler,
+        ui_session_interface::Session,
+    };
+    use hbb_common::message_proto::ControlKey;
+    use tokio::sync::mpsc;
+
+    fn v(k: &[&str]) -> Vec<String> {
+        k.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn detects_chord_and_alias() {
         assert!(is_ctrl_alt_del(&v(&["ctrl", "alt", "delete"])));
@@ -2097,5 +2108,47 @@ mod ctrl_alt_del_tests {
         assert!(is_ctrl_alt_del(&v(&[" ctrl_alt_del "])));
         assert!(!is_ctrl_alt_del(&v(&["ctrl", "delete"])));
         assert!(!is_ctrl_alt_del(&v(&["ctrl", "alt", "t"])));
+    }
+
+    #[test]
+    fn desktop_ctrl_alt_del_respects_input_lock() {
+        let session = Session::<FlutterHandler>::default();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        *session.sender.write().unwrap() = Some(sender);
+
+        set_local_input_lock_for_peer("", true);
+        session.ctrl_alt_del();
+        let event = receiver.try_recv();
+        set_local_input_lock_for_peer("", false);
+
+        assert!(event.is_err());
+    }
+
+    #[test]
+    fn agent_ctrl_alt_del_returns_error_when_dispatch_fails() {
+        let session = Session::<FlutterHandler>::default();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        *session.sender.write().unwrap() = Some(sender);
+        drop(receiver);
+
+        assert_eq!(
+            session.try_ctrl_alt_del_agent(),
+            Err("desktop session input channel is closed".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_ctrl_alt_del_uses_target_platform_not_current_ui_platform() {
+        let session = Session::<FlutterHandler>::default();
+        session.lc.write().unwrap().info.platform = "Linux".to_string();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        *session.sender.write().unwrap() = Some(sender);
+
+        session.try_ctrl_alt_del_agent().unwrap();
+
+        let Data::Message(message) = receiver.try_recv().unwrap() else {
+            panic!("expected a keyboard message");
+        };
+        assert_eq!(message.key_event().control_key(), ControlKey::Delete);
     }
 }

@@ -770,7 +770,15 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn send_key_event(&self, evt: &KeyEvent) {
-        let _ = self.try_send_key_event(evt);
+        if crate::agent_bridge::should_drop_user_input(&self.peer_id()) {
+            return;
+        }
+        // Keep desktop sends under the sender read lock, as Interface::send did before MCP.
+        let mut msg = evt.clone();
+        self.swap_modifier_key(&mut msg);
+        let mut msg_out = Message::new();
+        msg_out.set_key_event(msg);
+        self.send(Data::Message(msg_out));
     }
 
     fn try_send_key_event(&self, evt: &KeyEvent) -> Result<(), String> {
@@ -1980,7 +1988,9 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn try_ctrl_alt_del_agent(&self) -> Result<(), String> {
-        self.try_send_key_event(&crate::keyboard::client::event_ctrl_alt_del())
+        self.try_send_key_event(&crate::keyboard::client::event_ctrl_alt_del_for_platform(
+            &self.peer_platform(),
+        ))
     }
 }
 
