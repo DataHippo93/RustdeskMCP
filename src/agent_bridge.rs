@@ -2082,7 +2082,8 @@ mod ctrl_alt_del_tests {
     use super::{is_ctrl_alt_del, set_local_input_lock_for_peer};
     use crate::{
         client::Data,
-        flutter::FlutterHandler,
+        flutter::{self, FlutterHandler},
+        flutter_ffi::SessionID,
         ui_session_interface::Session,
     };
     use hbb_common::{
@@ -2111,6 +2112,41 @@ mod ctrl_alt_del_tests {
             config.get_config().info.platform = platform.to_string();
         }
         session
+    }
+
+    struct CurrentUiSessionGuard {
+        previous_session_id: SessionID,
+        installed_session_ids: Vec<SessionID>,
+    }
+
+    impl CurrentUiSessionGuard {
+        fn new() -> Self {
+            Self {
+                previous_session_id: flutter::get_cur_session_id(),
+                installed_session_ids: Vec::new(),
+            }
+        }
+
+        fn set_platform(&mut self, peer_id: &str, platform: &str) {
+            let session_id = SessionID::new_v4();
+            let session = std::sync::Arc::new(session_with_target_platform(peer_id, platform));
+            flutter::sessions::insert_session(
+                session_id,
+                ConnType::DEFAULT_CONN,
+                session,
+            );
+            flutter::set_cur_session_id(session_id);
+            self.installed_session_ids.push(session_id);
+        }
+    }
+
+    impl Drop for CurrentUiSessionGuard {
+        fn drop(&mut self) {
+            flutter::set_cur_session_id(self.previous_session_id);
+            for session_id in self.installed_session_ids.drain(..) {
+                let _ = flutter::sessions::remove_session_by_session_id(&session_id);
+            }
+        }
     }
 
     #[test]
@@ -2163,11 +2199,19 @@ mod ctrl_alt_del_tests {
     }
 
     #[test]
-    fn agent_ctrl_alt_del_uses_each_target_platform() {
-        let linux = session_with_target_platform(
-            "ctrl-alt-del-test-linux-target",
-            "Linux",
+    fn agent_ctrl_alt_del_uses_target_platform_not_current_ui_platform() {
+        let mut current_ui = CurrentUiSessionGuard::new();
+
+        // The current UI and target platforms deliberately disagree in both directions.
+        // This prevents a future change from reading the current UI platform instead of
+        // the target session platform and turning this regression test into a tautology.
+        current_ui.set_platform("ctrl-alt-del-test-current-windows", "Windows");
+        let linux = session_with_target_platform("ctrl-alt-del-test-linux-target", "Linux");
+        assert_eq!(
+            flutter::get_cur_session().unwrap().peer_platform(),
+            "Windows"
         );
+        assert_eq!(linux.peer_platform(), "Linux");
         let (linux_sender, mut linux_receiver) = mpsc::unbounded_channel();
         *linux.sender.write().unwrap() = Some(linux_sender);
         linux.try_ctrl_alt_del_agent().unwrap();
@@ -2180,10 +2224,13 @@ mod ctrl_alt_del_tests {
             ControlKey::Delete
         );
 
-        let windows = session_with_target_platform(
-            "ctrl-alt-del-test-windows-target",
-            "Windows",
+        current_ui.set_platform("ctrl-alt-del-test-current-linux", "Linux");
+        let windows = session_with_target_platform("ctrl-alt-del-test-windows-target", "Windows");
+        assert_eq!(
+            flutter::get_cur_session().unwrap().peer_platform(),
+            "Linux"
         );
+        assert_eq!(windows.peer_platform(), "Windows");
         let (windows_sender, mut windows_receiver) = mpsc::unbounded_channel();
         *windows.sender.write().unwrap() = Some(windows_sender);
         windows.try_ctrl_alt_del_agent().unwrap();
