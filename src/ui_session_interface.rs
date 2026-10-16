@@ -773,17 +773,41 @@ impl<T: InvokeUiSession> Session<T> {
         if crate::agent_bridge::should_drop_user_input(&self.peer_id()) {
             return;
         }
-        self.send_key_event_agent(evt);
-    }
-
-    pub fn send_key_event_agent(&self, evt: &KeyEvent) {
-        // mode: legacy(0), map(1), translate(2), auto(3)
-
+        // Keep desktop sends under the sender read lock, as Interface::send did before MCP.
         let mut msg = evt.clone();
         self.swap_modifier_key(&mut msg);
         let mut msg_out = Message::new();
         msg_out.set_key_event(msg);
         self.send(Data::Message(msg_out));
+    }
+
+    fn try_send_key_event(&self, evt: &KeyEvent) -> Result<(), String> {
+        if crate::agent_bridge::should_drop_user_input(&self.peer_id()) {
+            return Ok(());
+        }
+        self.try_send_key_event_agent(evt)
+    }
+
+    pub fn send_key_event_agent(&self, evt: &KeyEvent) {
+        let _ = self.try_send_key_event_agent(evt);
+    }
+
+    pub fn try_send_key_event_agent(&self, evt: &KeyEvent) -> Result<(), String> {
+        // mode: legacy(0), map(1), translate(2), auto(3)
+        let mut msg = evt.clone();
+        self.swap_modifier_key(&mut msg);
+        let mut msg_out = Message::new();
+        msg_out.set_key_event(msg);
+        let sender = self
+            .sender
+            .read()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "desktop session is not connected".to_string())?;
+        sender
+            .send(Data::Message(msg_out))
+            .map_err(|_| "desktop session input channel is closed".to_string())
     }
 
     pub fn send_chat(&self, text: String) {
@@ -1961,6 +1985,12 @@ impl<T: InvokeUiSession> Session<T> {
     }
     pub fn ctrl_alt_del(&self) {
         self.send_key_event(&crate::keyboard::client::event_ctrl_alt_del());
+    }
+
+    pub fn try_ctrl_alt_del_agent(&self) -> Result<(), String> {
+        self.try_send_key_event(&crate::keyboard::client::event_ctrl_alt_del_for_platform(
+            &self.peer_platform(),
+        ))
     }
 }
 
