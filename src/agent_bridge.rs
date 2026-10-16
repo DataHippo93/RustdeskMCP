@@ -338,7 +338,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "keyboard_hotkey",
-                "Send a key chord such as Ctrl+V or Enter to the remote desktop session while temporarily blocking user input. [\"ctrl\",\"alt\",\"delete\"] (or [\"ctrl_alt_del\"]) sends a real Ctrl+Alt+Del to unlock or sign in.",
+                "Send a key chord such as Ctrl+V or Enter to the remote desktop session while temporarily blocking user input. Ctrl+Alt+Del sends a real secure attention sequence when keys are exactly three trimmed, case-insensitive values containing ctrl or control, alt, and del or delete in any order, or exactly one trimmed, case-insensitive alias: ctrl_alt_del, ctrl+alt+del, ctrl+alt+delete, ctrlaltdel, or sas.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -850,7 +850,7 @@ fn keyboard_hotkey(session_handle: &str, keys: &[String]) -> Result<Value, Strin
     // Ctrl+Alt+Del is a secure attention sequence: Windows ignores it as plain key events.
     // Send RustDesk's dedicated CtrlAltDel control key instead (same as the toolbar menu item).
     if is_ctrl_alt_del(keys) {
-        with_agent_input_bypass(|| session.ctrl_alt_del());
+        with_agent_input_bypass(|| session.ctrl_alt_del())?;
         return Ok(json!({
             "success": true,
             "session": session_handle,
@@ -2084,7 +2084,16 @@ mod ctrl_alt_del_tests {
     fn detects_chord_and_alias() {
         assert!(is_ctrl_alt_del(&v(&["ctrl", "alt", "delete"])));
         assert!(is_ctrl_alt_del(&v(&["Alt", "Control", "Del"])));
-        assert!(is_ctrl_alt_del(&v(&["ctrl_alt_del"])));
+        for alias in [
+            "ctrl_alt_del",
+            "ctrl+alt+del",
+            "ctrl+alt+delete",
+            "ctrlaltdel",
+            "sas",
+        ] {
+            assert!(is_ctrl_alt_del(&v(&[alias])));
+        }
+        assert!(is_ctrl_alt_del(&v(&[" ctrl_alt_del "])));
         assert!(!is_ctrl_alt_del(&v(&["ctrl", "delete"])));
         assert!(!is_ctrl_alt_del(&v(&["ctrl", "alt", "t"])));
     }

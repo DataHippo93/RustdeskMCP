@@ -560,7 +560,7 @@ pub fn session_lock_screen(session_id: SessionID) {
 
 pub fn session_ctrl_alt_del(session_id: SessionID) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.ctrl_alt_del();
+        let _ = session.ctrl_alt_del();
     }
 }
 

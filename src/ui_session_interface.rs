@@ -777,13 +777,25 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn send_key_event_agent(&self, evt: &KeyEvent) {
-        // mode: legacy(0), map(1), translate(2), auto(3)
+        let _ = self.try_send_key_event_agent(evt);
+    }
 
+    pub fn try_send_key_event_agent(&self, evt: &KeyEvent) -> Result<(), String> {
+        // mode: legacy(0), map(1), translate(2), auto(3)
         let mut msg = evt.clone();
         self.swap_modifier_key(&mut msg);
         let mut msg_out = Message::new();
         msg_out.set_key_event(msg);
-        self.send(Data::Message(msg_out));
+        let sender = self
+            .sender
+            .read()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "desktop session is not connected".to_string())?;
+        sender
+            .send(Data::Message(msg_out))
+            .map_err(|_| "desktop session input channel is closed".to_string())
     }
 
     pub fn send_chat(&self, text: String) {
@@ -1959,8 +1971,8 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn lock_screen(&self) {
         self.send_key_event(&crate::keyboard::client::event_lock_screen());
     }
-    pub fn ctrl_alt_del(&self) {
-        self.send_key_event(&crate::keyboard::client::event_ctrl_alt_del());
+    pub fn ctrl_alt_del(&self) -> Result<(), String> {
+        self.try_send_key_event_agent(&crate::keyboard::client::event_ctrl_alt_del())
     }
 }
 
