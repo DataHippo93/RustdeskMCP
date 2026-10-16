@@ -770,10 +770,14 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn send_key_event(&self, evt: &KeyEvent) {
+        let _ = self.try_send_key_event(evt);
+    }
+
+    fn try_send_key_event(&self, evt: &KeyEvent) -> Result<(), String> {
         if crate::agent_bridge::should_drop_user_input(&self.peer_id()) {
-            return;
+            return Ok(());
         }
-        self.send_key_event_agent(evt);
+        self.try_send_key_event_agent(evt)
     }
 
     pub fn send_key_event_agent(&self, evt: &KeyEvent) {
@@ -1971,8 +1975,12 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn lock_screen(&self) {
         self.send_key_event(&crate::keyboard::client::event_lock_screen());
     }
-    pub fn ctrl_alt_del(&self) -> Result<(), String> {
-        self.try_send_key_event_agent(&crate::keyboard::client::event_ctrl_alt_del())
+    pub fn ctrl_alt_del(&self) {
+        self.send_key_event(&crate::keyboard::client::event_ctrl_alt_del());
+    }
+
+    pub fn try_ctrl_alt_del_agent(&self) -> Result<(), String> {
+        self.try_send_key_event(&crate::keyboard::client::event_ctrl_alt_del())
     }
 }
 

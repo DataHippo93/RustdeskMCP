@@ -850,9 +850,10 @@ fn keyboard_hotkey(session_handle: &str, keys: &[String]) -> Result<Value, Strin
     // Ctrl+Alt+Del is a secure attention sequence: Windows ignores it as plain key events.
     // Send RustDesk's dedicated CtrlAltDel control key instead (same as the toolbar menu item).
     if is_ctrl_alt_del(keys) {
-        with_agent_input_bypass(|| session.ctrl_alt_del())?;
+        with_agent_input_bypass(|| session.try_ctrl_alt_del_agent())?;
         return Ok(json!({
-            "success": true,
+            "dispatched": true,
+            "executionConfirmed": false,
             "session": session_handle,
             "actualSession": session_id.to_string(),
             "keys": keys,
