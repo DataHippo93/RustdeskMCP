@@ -35,6 +35,22 @@ pub use version::*;
     not(any(target_os = "android", target_os = "ios"))
 ))]
 pub mod agent_bridge;
+/// No-op stand-in for builds without the agent bridge (non-flutter desktop, Android, iOS),
+/// so the shared call sites compile everywhere. The real module is desktop flutter only.
+#[cfg(not(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+)))]
+#[allow(dead_code)]
+pub mod agent_bridge {
+    pub fn start_server_once() {}
+    pub fn should_drop_user_input(_peer_id: &str) -> bool {
+        false
+    }
+    pub fn clear_local_input_lock_for_peer(_peer_id: &str) {}
+    pub fn record_frame<S, R>(_session_ids: &[S], _display: usize, _rgba: &R) {}
+    pub fn record_terminal_response<S, T>(_session_ids: &[S], _response: &T) {}
+}
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 mod bridge_generated;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
