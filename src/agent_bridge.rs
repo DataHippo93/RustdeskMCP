@@ -338,7 +338,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "keyboard_hotkey",
-                "Send a key chord such as Ctrl+V or Enter to the remote desktop session while temporarily blocking user input.",
+                "Send a key chord such as Ctrl+V or Enter to the remote desktop session while temporarily blocking user input. Ctrl+Alt+Del sends RustDesk's dedicated CtrlAltDel secure-attention control event when the targeted remote session is Windows; for other target platforms it sends the ordinary Ctrl+Alt+Delete event. Recognized forms are exactly three trimmed, case-insensitive values containing ctrl or control, alt, and del or delete in any order, or exactly one trimmed, case-insensitive alias: ctrl_alt_del, ctrl+alt+del, ctrl+alt+delete, ctrlaltdel, or sas.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -847,6 +847,19 @@ fn keyboard_hotkey(session_handle: &str, keys: &[String]) -> Result<Value, Strin
     ensure_mcp_enabled()?;
     let session_id = resolve_actual_session_id(session_handle)?;
     let session = desktop_session(session_handle)?;
+    // Ctrl+Alt+Del is a secure attention sequence: Windows ignores it as plain key events.
+    // Send RustDesk's dedicated CtrlAltDel control key instead (same as the toolbar menu item).
+    if is_ctrl_alt_del(keys) {
+        with_agent_input_bypass(|| session.try_ctrl_alt_del_agent())?;
+        return Ok(json!({
+            "dispatched": true,
+            "executionConfirmed": false,
+            "session": session_handle,
+            "actualSession": session_id.to_string(),
+            "keys": keys,
+            "sent": "ctrl_alt_del"
+        }));
+    }
     let hotkey = Hotkey::parse(keys)?;
     with_agent_input_bypass(|| -> Result<(), String> {
         let keyboard_mode = session.get_keyboard_mode();
@@ -2045,5 +2058,189 @@ impl ProtocolError {
             code,
             message: message.into(),
         }
+    }
+}
+
+/// True for ["ctrl","alt","del"|"delete"] in any order/case, or a single "ctrl_alt_del"/"ctrl+alt+del"/"sas".
+fn is_ctrl_alt_del(keys: &[String]) -> bool {
+    let norm: Vec<String> = keys.iter().map(|k| k.trim().to_ascii_lowercase()).collect();
+    if norm.len() == 1 {
+        return matches!(
+            norm[0].as_str(),
+            "ctrl_alt_del" | "ctrl+alt+del" | "ctrl+alt+delete" | "ctrlaltdel" | "sas"
+        );
+    }
+    if norm.len() != 3 {
+        return false;
+    }
+    let has = |names: &[&str]| norm.iter().any(|k| names.contains(&k.as_str()));
+    has(&["ctrl", "control"]) && has(&["alt"]) && has(&["del", "delete"])
+}
+
+#[cfg(test)]
+mod ctrl_alt_del_tests {
+    use super::{is_ctrl_alt_del, set_local_input_lock_for_peer};
+    use crate::{
+        client::Data,
+        flutter::{self, FlutterHandler},
+        flutter_ffi::SessionID,
+        ui_session_interface::Session,
+    };
+    use hbb_common::{
+        message_proto::ControlKey,
+        rendezvous_proto::ConnType,
+        tokio::sync::mpsc,
+    };
+
+    fn v(k: &[&str]) -> Vec<String> {
+        k.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn session_with_target_platform(peer_id: &str, platform: &str) -> Session<FlutterHandler> {
+        let session = Session::<FlutterHandler>::default();
+        {
+            let mut config = session.lc.write().unwrap();
+            config.initialize(
+                peer_id.to_string(),
+                ConnType::DEFAULT_CONN,
+                None,
+                false,
+                None,
+                None,
+                None,
+            );
+            config.get_config().info.platform = platform.to_string();
+        }
+        session
+    }
+
+    struct CurrentUiSessionGuard {
+        previous_session_id: SessionID,
+        installed_session_ids: Vec<SessionID>,
+    }
+
+    impl CurrentUiSessionGuard {
+        fn new() -> Self {
+            Self {
+                previous_session_id: flutter::get_cur_session_id(),
+                installed_session_ids: Vec::new(),
+            }
+        }
+
+        fn set_platform(&mut self, peer_id: &str, platform: &str) {
+            let session_id = SessionID::new_v4();
+            let session = std::sync::Arc::new(session_with_target_platform(peer_id, platform));
+            flutter::sessions::insert_session(
+                session_id,
+                ConnType::DEFAULT_CONN,
+                session,
+            );
+            flutter::set_cur_session_id(session_id);
+            self.installed_session_ids.push(session_id);
+        }
+    }
+
+    impl Drop for CurrentUiSessionGuard {
+        fn drop(&mut self) {
+            flutter::set_cur_session_id(self.previous_session_id);
+            for session_id in self.installed_session_ids.drain(..) {
+                let _ = flutter::sessions::remove_session_by_session_id(&session_id);
+            }
+        }
+    }
+
+    #[test]
+    fn detects_chord_and_alias() {
+        assert!(is_ctrl_alt_del(&v(&["ctrl", "alt", "delete"])));
+        assert!(is_ctrl_alt_del(&v(&["Alt", "Control", "Del"])));
+        for alias in [
+            "ctrl_alt_del",
+            "ctrl+alt+del",
+            "ctrl+alt+delete",
+            "ctrlaltdel",
+            "sas",
+        ] {
+            assert!(is_ctrl_alt_del(&v(&[alias])));
+        }
+        assert!(is_ctrl_alt_del(&v(&[" ctrl_alt_del "])));
+        assert!(!is_ctrl_alt_del(&v(&["ctrl", "delete"])));
+        assert!(!is_ctrl_alt_del(&v(&["ctrl", "alt", "t"])));
+    }
+
+    #[test]
+    fn desktop_ctrl_alt_del_respects_input_lock() {
+        let peer_id = "ctrl-alt-del-test-desktop-lock";
+        let session = session_with_target_platform(peer_id, "Windows");
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        *session.sender.write().unwrap() = Some(sender);
+
+        set_local_input_lock_for_peer(peer_id, true);
+        session.ctrl_alt_del();
+        let event = receiver.try_recv();
+        set_local_input_lock_for_peer(peer_id, false);
+
+        assert!(event.is_err());
+    }
+
+    #[test]
+    fn agent_ctrl_alt_del_returns_error_when_dispatch_fails() {
+        let session = session_with_target_platform(
+            "ctrl-alt-del-test-dispatch-failure",
+            "Windows",
+        );
+        let (sender, receiver) = mpsc::unbounded_channel();
+        *session.sender.write().unwrap() = Some(sender);
+        drop(receiver);
+
+        assert_eq!(
+            session.try_ctrl_alt_del_agent(),
+            Err("desktop session input channel is closed".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_ctrl_alt_del_uses_target_platform_not_current_ui_platform() {
+        let mut current_ui = CurrentUiSessionGuard::new();
+
+        // The current UI and target platforms deliberately disagree in both directions.
+        // This prevents a future change from reading the current UI platform instead of
+        // the target session platform and turning this regression test into a tautology.
+        current_ui.set_platform("ctrl-alt-del-test-current-windows", "Windows");
+        let linux = session_with_target_platform("ctrl-alt-del-test-linux-target", "Linux");
+        assert_eq!(
+            flutter::get_cur_session().unwrap().peer_platform(),
+            "Windows"
+        );
+        assert_eq!(linux.peer_platform(), "Linux");
+        let (linux_sender, mut linux_receiver) = mpsc::unbounded_channel();
+        *linux.sender.write().unwrap() = Some(linux_sender);
+        linux.try_ctrl_alt_del_agent().unwrap();
+
+        let Data::Message(linux_message) = linux_receiver.try_recv().unwrap() else {
+            panic!("expected a keyboard message for the Linux target");
+        };
+        assert_eq!(
+            linux_message.key_event().control_key(),
+            ControlKey::Delete
+        );
+
+        current_ui.set_platform("ctrl-alt-del-test-current-linux", "Linux");
+        let windows = session_with_target_platform("ctrl-alt-del-test-windows-target", "Windows");
+        assert_eq!(
+            flutter::get_cur_session().unwrap().peer_platform(),
+            "Linux"
+        );
+        assert_eq!(windows.peer_platform(), "Windows");
+        let (windows_sender, mut windows_receiver) = mpsc::unbounded_channel();
+        *windows.sender.write().unwrap() = Some(windows_sender);
+        windows.try_ctrl_alt_del_agent().unwrap();
+
+        let Data::Message(windows_message) = windows_receiver.try_recv().unwrap() else {
+            panic!("expected a keyboard message for the Windows target");
+        };
+        assert_eq!(
+            windows_message.key_event().control_key(),
+            ControlKey::CtrlAltDel
+        );
     }
 }
