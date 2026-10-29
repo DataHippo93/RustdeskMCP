@@ -18,6 +18,8 @@ const LOCK = path.join(os.tmpdir(), 'rustdeskmcp-launch.lock');
 const GUI_EXE = process.env.RUSTDESK_MCP_EXE || 'C:\\Program Files\\RustDeskMCP\\RustDeskMCP.exe';
 const GUI_ENV = ['RUSTDESK_MCP_TOKEN', 'RUSTDESK_MCP_AUTH', 'RUSTDESK_MCP_ALLOWED_IDS'];
 
+let ownLock = false;
+const releaseLock = () => { if (ownLock) { try { fs.unlinkSync(LOCK); } catch {} ownLock = false; } };
 const log = (msg) => process.stderr.write(`[launch-mcp] ${msg}\n`);
 
 function userEnv(name) {
@@ -47,7 +49,7 @@ function startGui() {
     if (Date.now() - st.mtimeMs < WAIT_MS) { log('another launcher is starting RustDeskMCP; waiting'); return true; }
     fs.unlinkSync(LOCK); // stale
   } catch {}
-  try { fs.closeSync(fs.openSync(LOCK, 'wx')); } catch { log('another launcher is starting RustDeskMCP; waiting'); return true; }
+  try { fs.closeSync(fs.openSync(LOCK, 'wx')); ownLock = true; } catch { log('another launcher is starting RustDeskMCP; waiting'); return true; }
   // Same env handoff as rdrestart.ps1, and like it, HKCU wins so GUI and proxy agree after a token rotation.
   const env = { ...process.env };
   for (const n of GUI_ENV) { const v = userEnv(n) || process.env[n]; if (v) env[n] = v; }
@@ -57,7 +59,7 @@ function startGui() {
     const gui = spawn(GUI_EXE, [], { detached: true, stdio: 'ignore', env, cwd: path.dirname(GUI_EXE) });
     gui.on('error', (e) => log(`failed to start RustDeskMCP: ${e.message}`));
     gui.unref(); // must outlive this launcher
-  } catch (e) { log(`failed to start RustDeskMCP: ${e.message}`); return false; }
+  } catch (e) { log(`failed to start RustDeskMCP: ${e.message}`); releaseLock(); return false; }
   log('RustDeskMCP was not running; started it');
   return true;
 }
@@ -68,17 +70,18 @@ async function waitForPort() {
   const deadline = Date.now() + WAIT_MS;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 1000));
-    if (await portOpen()) { try { fs.unlinkSync(LOCK); } catch {} return true; }
+    if (await portOpen()) { releaseLock(); return true; }
   }
+  releaseLock();
   return false;
 }
 
 (async () => {
-  const auth = process.env.RUSTDESK_MCP_AUTH || userEnv('RUSTDESK_MCP_AUTH');
+  const auth = userEnv('RUSTDESK_MCP_AUTH') || process.env.RUSTDESK_MCP_AUTH; // HKCU first, same as the GUI
   if (!auth) { log('RUSTDESK_MCP_AUTH not set in user environment'); process.exit(1); }
 
   if (!(await waitForPort())) {
-    log(`nothing listening on ${HOST}:${PORT}. RustDeskMCP did not start, failed to bind, or another process holds the port.`);
+    log(`nothing listening on ${HOST}:${PORT} after ${WAIT_MS}ms. RustDeskMCP did not start, failed to bind, or another process holds the port.`);
     process.exit(1);
   }
 
