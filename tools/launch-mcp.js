@@ -8,11 +8,13 @@
 const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 
 const HOST = '127.0.0.1';
 const PORT = 59940;
-const WAIT_MS = Number(process.env.RUSTDESK_MCP_WAIT_MS || 45000); // stay under Claude desktop's start timeout
+const WAIT_MS = Number(process.env.RUSTDESK_MCP_WAIT_MS) > 0 ? Number(process.env.RUSTDESK_MCP_WAIT_MS) : 30000; // leave margin under Claude desktop's start timeout
+const LOCK = path.join(os.tmpdir(), 'rustdeskmcp-launch.lock');
 const GUI_EXE = process.env.RUSTDESK_MCP_EXE || 'C:\\Program Files\\RustDeskMCP\\RustDeskMCP.exe';
 const GUI_ENV = ['RUSTDESK_MCP_TOKEN', 'RUSTDESK_MCP_AUTH', 'RUSTDESK_MCP_ALLOWED_IDS'];
 
@@ -36,24 +38,37 @@ function portOpen() {
   });
 }
 
+// Returns true if a start was attempted (by us or a concurrent launcher), false if it cannot work.
 function startGui() {
-  if (!fs.existsSync(GUI_EXE)) { log(`RustDeskMCP not found at ${GUI_EXE}; set RUSTDESK_MCP_EXE`); return; }
-  // Same env handoff as rdrestart.ps1: the GUI reads its token and allow-list from its own env.
+  if (!fs.existsSync(GUI_EXE)) { log(`RustDeskMCP not found at ${GUI_EXE}; set RUSTDESK_MCP_EXE`); return false; }
+  // Two launchers starting together must not spawn two GUIs: only the lock holder spawns.
+  try {
+    const st = fs.statSync(LOCK);
+    if (Date.now() - st.mtimeMs < WAIT_MS) { log('another launcher is starting RustDeskMCP; waiting'); return true; }
+    fs.unlinkSync(LOCK); // stale
+  } catch {}
+  try { fs.closeSync(fs.openSync(LOCK, 'wx')); } catch { log('another launcher is starting RustDeskMCP; waiting'); return true; }
+  // Same env handoff as rdrestart.ps1, and like it, HKCU wins so GUI and proxy agree after a token rotation.
   const env = { ...process.env };
-  for (const n of GUI_ENV) { const v = process.env[n] || userEnv(n); if (v) env[n] = v; }
-  const gui = spawn(GUI_EXE, [], { detached: true, stdio: 'ignore', env, cwd: path.dirname(GUI_EXE) });
-  gui.on('error', (e) => log(`failed to start RustDeskMCP: ${e.message}`));
-  gui.unref(); // must outlive this launcher
+  for (const n of GUI_ENV) { const v = userEnv(n) || process.env[n]; if (v) env[n] = v; }
+  if (!env.RUSTDESK_MCP_TOKEN) log('warning: RUSTDESK_MCP_TOKEN not set; RustDeskMCP will refuse every request');
+  try {
+    // If the GUI is already running with its MCP port down, this only raises the existing window.
+    const gui = spawn(GUI_EXE, [], { detached: true, stdio: 'ignore', env, cwd: path.dirname(GUI_EXE) });
+    gui.on('error', (e) => log(`failed to start RustDeskMCP: ${e.message}`));
+    gui.unref(); // must outlive this launcher
+  } catch (e) { log(`failed to start RustDeskMCP: ${e.message}`); return false; }
   log('RustDeskMCP was not running; started it');
+  return true;
 }
 
 async function waitForPort() {
   if (await portOpen()) return true;
-  startGui();
+  if (!startGui()) return false;
   const deadline = Date.now() + WAIT_MS;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 1000));
-    if (await portOpen()) return true;
+    if (await portOpen()) { try { fs.unlinkSync(LOCK); } catch {} return true; }
   }
   return false;
 }
@@ -63,7 +78,7 @@ async function waitForPort() {
   if (!auth) { log('RUSTDESK_MCP_AUTH not set in user environment'); process.exit(1); }
 
   if (!(await waitForPort())) {
-    log(`nothing listening on ${HOST}:${PORT} after ${WAIT_MS}ms. Is "Enable MCP server" on in RustDeskMCP Settings > Security?`);
+    log(`nothing listening on ${HOST}:${PORT}. RustDeskMCP did not start, failed to bind, or another process holds the port.`);
     process.exit(1);
   }
 
